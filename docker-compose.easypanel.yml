@@ -1,11 +1,19 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: threadboss
-      POSTGRES_USER: threadboss
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  image: pgvector/pgvector:pg16
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    POSTGRES_DB: threadboss
+    POSTGRES_USER: threadboss
+  volumes:
+    - postgres_data:/var/lib/postgresql/data
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U threadboss -d threadboss"]
+    interval: 5s
+    timeout: 5s
+    retries: 10
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
