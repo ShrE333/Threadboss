@@ -17,7 +17,6 @@ def _derive_chat_id(payload: dict[str, Any], owner_id: str) -> str:
     recipient = normalize_jid(payload.get('to'))
     from_me = bool(payload.get('fromMe'))
 
-    # For groups, the group ID is normally in from/to depending on direction.
     for candidate in (sender, recipient):
         if candidate.endswith('@g.us') or candidate.endswith('@newsletter') or candidate == 'status@broadcast':
             return candidate
@@ -29,9 +28,62 @@ def _derive_chat_id(payload: dict[str, Any], owner_id: str) -> str:
 
 def _timestamp(value: Any) -> datetime:
     try:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        numeric = float(value)
+        # Be tolerant if WAHA changes an event timestamp to milliseconds.
+        if numeric > 10_000_000_000:
+            numeric /= 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
     except Exception:
         return datetime.now(timezone.utc)
+
+
+def _deep_find(obj: Any, wanted: set[str]) -> str | None:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in wanted and isinstance(value, (str, int)) and str(value).strip():
+                return str(value).strip()
+        for value in obj.values():
+            found = _deep_find(value, wanted)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _deep_find(value, wanted)
+            if found:
+                return found
+    return None
+
+
+def _extract_interactive_selection(payload: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """Best-effort extraction across WAHA engines/versions.
+
+    List replies are not perfectly uniform across engines. Search the payload for
+    common WhatsApp/WAHA names while retaining body as the visible-title fallback.
+    """
+    interactive_id = _deep_find(
+        payload,
+        {
+            'selectedRowId', 'selectedRowID', 'selectedId', 'selectedID',
+            'rowId', 'rowID', 'buttonId', 'buttonID',
+        },
+    )
+    interactive_title = _deep_find(
+        payload,
+        {
+            'selectedDisplayText', 'selectedTitle', 'displayText', 'buttonText',
+        },
+    )
+    context_id = _deep_find(
+        payload,
+        {'contextInfoId', 'stanzaId', 'quotedMessageId', 'replyTo'},
+    )
+    return interactive_id, interactive_title, context_id
+
+
+def _is_self(owner_id: str, owner_lid: str | None, *candidates: str | None) -> bool:
+    aliases = {normalize_jid(x) for x in (owner_id, owner_lid) if x}
+    normalized = [normalize_jid(x) for x in candidates if x]
+    return any(value in aliases for value in normalized)
 
 
 def normalize_waha_event(
@@ -62,17 +114,7 @@ def normalize_waha_event(
         ])
         message_id = 'synthetic_' + hashlib.sha256(basis.encode('utf-8')).hexdigest()[:32]
 
-    # GOWS can represent the same WhatsApp account in two forms:
-    #   phone-number JID: 9199...@c.us
-    #   linked ID:        1234...@lid
-    # Treat BOTH as aliases of the owner when deciding whether a message came
-    # from WhatsApp's "Message Yourself" chat.
-    owner_aliases = {
-        normalize_jid(value)
-        for value in (owner_id, owner_lid)
-        if value
-    }
-
+    owner_aliases = {normalize_jid(value) for value in (owner_id, owner_lid) if value}
     normalized_chat = normalize_jid(chat_id)
     normalized_sender = normalize_jid(sender_id)
     normalized_recipient = normalize_jid(recipient_id)
@@ -92,6 +134,7 @@ def normalize_waha_event(
 
     source = payload.get('source') or event.get('source')
     event_id = f'{session}:{message_id}'
+    interactive_id, interactive_title, interactive_context_id = _extract_interactive_selection(payload)
 
     return NormalizedMessage(
         event_id=event_id,
@@ -110,8 +153,75 @@ def normalize_waha_event(
         source=str(source) if source is not None else None,
         timestamp=_timestamp(payload.get('timestamp')),
         body=str(payload.get('body') or ''),
+        interactive_id=interactive_id,
+        interactive_title=interactive_title,
+        interactive_context_id=interactive_context_id,
         has_media=bool(payload.get('hasMedia') or media),
         media=media,
         raw_engine=event.get('engine'),
         raw_event=str(event.get('event') or 'message.any'),
+    )
+
+
+def normalize_waha_poll_vote_event(
+    event: dict[str, Any],
+    *,
+    tenant_id: str,
+    owner_id: str,
+    owner_lid: str | None = None,
+) -> NormalizedMessage:
+    payload = event.get('payload') or {}
+    vote = payload.get('vote') if isinstance(payload.get('vote'), dict) else {}
+    poll = payload.get('poll') if isinstance(payload.get('poll'), dict) else {}
+    session = str(event.get('session') or 'default')
+    owner_id = normalize_jid(owner_id)
+    owner_lid = normalize_jid(owner_lid) or None
+
+    def jid(value: Any) -> str:
+        if value in {None, '', 'me'}:
+            return owner_lid or owner_id
+        return normalize_jid(str(value))
+
+    sender_id = jid(vote.get('from'))
+    recipient_id = jid(vote.get('to'))
+    poll_to = jid(poll.get('to'))
+    chat_id = poll_to or recipient_id or sender_id or owner_lid or owner_id
+
+    selected = vote.get('selectedOptions') if isinstance(vote.get('selectedOptions'), list) else []
+    selected = [str(x) for x in selected if str(x).strip()]
+    title = selected[-1] if selected else ''
+
+    poll_id = str(poll.get('id') or '')
+    vote_id = str(vote.get('id') or '')
+    message_id = vote_id or ('pollvote_' + hashlib.sha256(
+        f'{session}|{poll_id}|{title}|{vote.get("timestamp")}'.encode('utf-8')
+    ).hexdigest()[:32])
+
+    is_self_chat = _is_self(owner_id, owner_lid, chat_id, sender_id, recipient_id)
+
+    return NormalizedMessage(
+        event_id=f'{session}:{message_id}',
+        tenant_id=tenant_id,
+        session_id=session,
+        owner_id=owner_id,
+        owner_lid=owner_lid,
+        message_id=message_id,
+        chat_id=chat_id,
+        chat_type='self' if is_self_chat else infer_chat_type(chat_id, owner_id),
+        is_self_chat=is_self_chat,
+        sender_id=sender_id or None,
+        recipient_id=recipient_id or None,
+        participant_id=None,
+        from_me=bool(vote.get('fromMe')),
+        # Poll votes are user interaction, not an API-originated ThreadBoss message.
+        source='app',
+        timestamp=_timestamp(vote.get('timestamp')),
+        body=title,
+        interactive_id=None,
+        interactive_title=title or None,
+        interactive_context_id=poll_id or None,
+        has_media=False,
+        media=None,
+        raw_engine=event.get('engine'),
+        raw_event=str(event.get('event') or 'poll.vote'),
     )

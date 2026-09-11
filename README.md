@@ -1,6 +1,33 @@
-# ThreadBoss V1.3 — Agents Core
+# ThreadBoss V1.4 — Native WhatsApp Menu + Agents Core
 
-V1.3 removes the teammate/mock Knowledge Agent. The real agent backend now lives inside ThreadBoss and is shared by **WhatsApp, Slack, and Telegram**.
+V1.4 keeps the in-house agent backend from V1.3 and adds a tap-first native WhatsApp control menu. V1.3 removed the teammate/mock Knowledge Agent. The real agent backend now lives inside ThreadBoss and is shared by **WhatsApp, Slack, and Telegram**.
+
+
+## V1.4 native WhatsApp menu
+
+In **Message Yourself**, send `hi`, `hello`, `start`, or `menu`. ThreadBoss first tries WAHA `POST /api/sendList` and shows a native selectable WhatsApp list. If list messages are unavailable for the installed WAHA tier/engine, ThreadBoss automatically falls back to a single-choice WhatsApp poll, then to plain text only if both interactive transports fail.
+
+Home menu:
+
+- 🧠 Ask Memory
+- 🤖 Agents
+- 🛠 Tools
+- ✅ Tasks
+- 🔔 Follow-ups
+
+Selecting **Agents** opens a second native menu for Knowledge, Planner, Follow-up and Action. Selecting **Tools** opens OCR, image-to-PDF, merge/compress PDF, resize, QR and transcription. Existing slash commands remain available.
+
+V1.4 also configures `poll.vote` webhooks so the interactive poll fallback can be handled without typing a command. Menu state is kept in Redis for 10 minutes by default.
+
+Environment:
+
+```env
+INTERACTIVE_MENU_ENABLED=true
+INTERACTIVE_MENU_POLL_FALLBACK=true
+MENU_STATE_TTL_SECONDS=600
+```
+
+After upgrading, run the existing session bootstrap once so WAHA's webhook subscription is updated from only `message.any` to include `poll.vote` / `poll.vote.failed`.
 
 ## Architecture
 

@@ -15,7 +15,7 @@ from .models import (
     HealthResponse,
     SessionBootstrapResponse,
 )
-from .normalizer import normalize_waha_event
+from .normalizer import normalize_waha_event, normalize_waha_poll_vote_event
 from .redis_bus import EventBus
 from .security import verify_admin_token, verify_channel_api_key, verify_waha_hmac
 from .waha import WahaClient, WahaError
@@ -24,7 +24,7 @@ settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title=settings.app_name, version='1.3.0')
+app = FastAPI(title=settings.app_name, version='1.4.0')
 bus = EventBus(settings)
 waha = WahaClient(settings)
 runtime = AgentRuntime(settings)
@@ -105,8 +105,14 @@ async def waha_webhook(request: Request) -> dict:
         event = json.loads(raw_body)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail='Invalid JSON') from exc
-    if event.get('event') != 'message.any':
-        return {'ok': True, 'ignored': event.get('event')}
+    event_name = str(event.get('event') or '')
+    if event_name not in {'message.any', 'poll.vote', 'poll.vote.failed'}:
+        return {'ok': True, 'ignored': event_name}
+
+    # Failed poll decryption has no usable selection. The next 'hi'/'menu' simply
+    # re-opens the interactive menu, so do not poison the event queue with it.
+    if event_name == 'poll.vote.failed':
+        return {'ok': True, 'ignored': event_name}
 
     session = str(event.get('session') or 'default')
     try:
@@ -118,7 +124,21 @@ async def waha_webhook(request: Request) -> dict:
     except WahaError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    message = normalize_waha_event(event, tenant_id=tenant_id, owner_id=owner_id, owner_lid=owner_lid)
+    if event_name == 'poll.vote':
+        # Only handle votes for polls created by this WhatsApp account. Menu polls
+        # are a fallback when native list messages are unavailable.
+        poll = (event.get('payload') or {}).get('poll') or {}
+        if not bool(poll.get('fromMe')):
+            return {'ok': True, 'ignored': 'foreign_poll_vote'}
+        message = normalize_waha_poll_vote_event(
+            event, tenant_id=tenant_id, owner_id=owner_id, owner_lid=owner_lid
+        )
+        if not message.is_self_chat:
+            return {'ok': True, 'ignored': 'non_self_poll_vote'}
+    else:
+        message = normalize_waha_event(
+            event, tenant_id=tenant_id, owner_id=owner_id, owner_lid=owner_lid
+        )
     redis_id = await bus.publish(message)
     return {
         'ok': True,

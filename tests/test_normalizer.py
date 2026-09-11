@@ -123,3 +123,69 @@ def test_gows_internal_jid_is_normalized():
     )
     assert msg.is_self_chat
     assert msg.chat_id == '919999999999@c.us'
+
+
+def test_list_reply_row_id_is_extracted():
+    event = {
+        'event': 'message.any',
+        'session': 'default',
+        'engine': 'GOWS',
+        'payload': {
+            'id': 'LIST1',
+            'timestamp': 1789080000,
+            'chatId': '123456789012345@lid',
+            'from': '919999999999@c.us',
+            'to': '123456789012345@lid',
+            'fromMe': True,
+            'body': '🛠 Tools',
+            'source': 'app',
+            '_data': {
+                'listResponse': {
+                    'singleSelectReply': {'selectedRowId': 'tb_home_tools'}
+                }
+            },
+        },
+    }
+    msg = normalize_waha_event(
+        event,
+        tenant_id='tenant_shriram',
+        owner_id='919999999999@c.us',
+        owner_lid='123456789012345@lid',
+    )
+    assert msg.interactive_id == 'tb_home_tools'
+    assert msg.is_self_chat is True
+
+
+def test_poll_vote_normalizes_to_self_chat_selection():
+    from app.normalizer import normalize_waha_poll_vote_event
+
+    event = {
+        'event': 'poll.vote',
+        'session': 'default',
+        'engine': 'GOWS',
+        'payload': {
+            'vote': {
+                'id': 'VOTE1',
+                'to': 'me',
+                'from': '919999999999@c.us',
+                'fromMe': True,
+                'selectedOptions': ['🤖 Agents'],
+                'timestamp': 1789080000,
+            },
+            'poll': {
+                'id': 'POLL1',
+                'to': '123456789012345@lid',
+                'from': 'me',
+                'fromMe': True,
+            },
+        },
+    }
+    msg = normalize_waha_poll_vote_event(
+        event,
+        tenant_id='tenant_shriram',
+        owner_id='919999999999@c.us',
+        owner_lid='123456789012345@lid',
+    )
+    assert msg.is_self_chat is True
+    assert msg.interactive_title == '🤖 Agents'
+    assert msg.interactive_context_id == 'POLL1'

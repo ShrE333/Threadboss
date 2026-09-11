@@ -33,6 +33,11 @@ class NormalizedMessage(BaseModel):
 
     timestamp: datetime
     body: str = ''
+    # Native WAHA interactive replies. rowId is preferred when available;
+    # interactive_title covers engines that return only the visible selection text.
+    interactive_id: Optional[str] = None
+    interactive_title: Optional[str] = None
+    interactive_context_id: Optional[str] = None
     has_media: bool = False
     media: Optional[MediaRef] = None
 

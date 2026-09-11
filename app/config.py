@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     event_dedupe_ttl_seconds: int = 7 * 24 * 60 * 60
     owner_cache_ttl_seconds: int = 24 * 60 * 60
 
+    # Native WhatsApp self-chat menu. sendList is preferred; a poll is used
+    # as an interactive fallback when the WAHA tier/engine rejects list messages.
+    interactive_menu_enabled: bool = True
+    interactive_menu_poll_fallback: bool = True
+    menu_state_ttl_seconds: int = 10 * 60
+
     # Media + multimodal self-chat
     media_download_timeout_seconds: float = 60.0
     max_media_mb: int = 25

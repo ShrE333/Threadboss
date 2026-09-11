@@ -5,6 +5,7 @@ import logging
 from .agent_runtime import AgentRuntime
 from .config import Settings
 from .media_processor import MediaProcessingError, MediaProcessor
+from .menu import InteractiveMenu
 from .models import NormalizedMessage
 from .redis_bus import EventBus
 from .tools import TOOLS_HELP, ToolEngine
@@ -13,27 +14,20 @@ from .waha import WahaClient
 logger = logging.getLogger(__name__)
 
 
-HELP_TEXT = """🧠 ThreadBoss V1.3
+HELP_TEXT = """🧠 ThreadBoss V1.4
 
-Message Yourself is your private ThreadBoss control plane.
+Type *hi* or *menu* to open the native WhatsApp menu.
 
-Agents:
-• Knowledge — searches your indexed chats
-• Planner — extracts commitments/tasks
-• Follow-up — shows overdue/upcoming commitments
-• Action — safe action planning (confirmation-first)
-• Tool Engine — PDF/image/OCR/voice utilities
-
-Commands:
+Quick commands still work:
 /help — this help
 /status — backend status
-/agents — agent/model configuration
+/agents — open Agents menu
 /tasks — open tasks
 /followups — pending/overdue items
 /memory <question> — force Knowledge Agent
-/tools — utility commands
+/tools — open Tools menu
 
-Normal chats/groups are indexed silently. ThreadBoss replies only here.
+Normal chats/groups are indexed silently. ThreadBoss replies only in Message Yourself.
 """.strip()
 
 
@@ -46,10 +40,19 @@ class SelfChatRouter:
         self.runtime = runtime
         self.media = media
         self.tools = ToolEngine(settings, bus, waha, media)
+        self.menu = InteractiveMenu(settings, bus, waha)
 
     async def handle(self, message: NormalizedMessage) -> None:
         body = message.body.strip()
         lowered = body.lower()
+
+        if lowered in {'hi', 'hii', 'hiii', 'hello', 'hey', 'start', '/start', 'menu', '/menu', 'home'}:
+            await self.menu.show_home(message)
+            return
+
+        choice = await self.menu.resolve(message)
+        if choice and await self._handle_menu_choice(message, choice):
+            return
 
         if lowered in {'/help', 'help', 'threadboss help'}:
             await self._reply(message, HELP_TEXT)
@@ -58,27 +61,21 @@ class SelfChatRouter:
             stats = await self.runtime.db.task_stats(message.tenant_id)
             await self._reply(
                 message,
-                '✅ ThreadBoss V1.3 is online.\n'
+                '✅ ThreadBoss V1.4 is online.\n'
                 f'Session: {message.session_id}\nTenant: {message.tenant_id}\n'
                 f'Knowledge: {self.settings.knowledge_provider}/{self.settings.knowledge_model}\n'
                 f'Embedding: {self.settings.embedding_provider}/{self.settings.embedding_model}\n'
                 f'Planner extraction: {"on" if self.settings.enable_planner_extraction else "off"}\n'
                 f'Open tasks: {stats.get("open", 0)}\n'
+                f'Interactive menu: {"on" if self.settings.interactive_menu_enabled else "off"}\n'
                 f'Local STT: {"on" if self.settings.enable_local_stt else "off"}\nTool Engine: on',
             )
             return
         if lowered in {'/agents', 'agents'}:
-            await self._reply(
-                message,
-                '🤖 Agents\n'
-                f'Knowledge: {self.settings.knowledge_provider} / {self.settings.knowledge_model}\n'
-                f'Planner: {self.settings.planner_provider} / {self.settings.planner_model}\n'
-                f'Follow-up: {self.settings.followup_provider} / {self.settings.followup_model}\n'
-                f'Action: {self.settings.action_provider} / {self.settings.action_model}\n'
-                f'Router: {self.settings.router_provider} / {self.settings.router_model} '
-                f'({"AI" if self.settings.enable_ai_router else "deterministic"})\n'
-                f'Embeddings: {self.settings.embedding_provider} / {self.settings.embedding_model}',
-            )
+            await self.menu.show_agents(message)
+            return
+        if lowered in {'/tools', 'tools', 'threadboss tools'}:
+            await self.menu.show_tools(message)
             return
 
         try:
@@ -114,6 +111,69 @@ class SelfChatRouter:
 
         result = await self.runtime.query(message.tenant_id, question)
         await self._reply(message, result.answer.strip() or 'I could not produce an answer.')
+
+    async def _handle_menu_choice(self, message: NormalizedMessage, choice: str) -> bool:
+        if choice == 'tb_back_home':
+            await self.menu.show_home(message)
+            return True
+        if choice == 'tb_home_memory':
+            await self._reply(message, '🧠 Ask Memory\n\nSend me your question, for example:\n“What did my professor say about the robotics review?”')
+            return True
+        if choice == 'tb_home_agents':
+            await self.menu.show_agents(message)
+            return True
+        if choice == 'tb_home_tools':
+            await self.menu.show_tools(message)
+            return True
+        if choice == 'tb_home_tasks':
+            result = await self.runtime.query(message.tenant_id, '/tasks')
+            await self._reply(message, result.answer)
+            return True
+        if choice == 'tb_home_followups':
+            result = await self.runtime.query(message.tenant_id, '/followups')
+            await self._reply(message, result.answer)
+            return True
+
+        if choice == 'tb_agent_knowledge':
+            await self._reply(message, '🧠 Knowledge Agent selected.\nAsk any question about your indexed chats and I’ll retrieve the evidence.')
+            return True
+        if choice == 'tb_agent_planner':
+            result = await self.runtime.query(message.tenant_id, '/tasks')
+            await self._reply(message, result.answer)
+            return True
+        if choice == 'tb_agent_followup':
+            result = await self.runtime.query(message.tenant_id, '/followups')
+            await self._reply(message, result.answer)
+            return True
+        if choice == 'tb_agent_action':
+            await self._reply(message, '⚡ Action Agent selected.\nTell me what you want to do. V1.4 stays confirmation-first and will not silently execute risky actions.')
+            return True
+
+        tool_commands = {
+            'tb_tool_ocr': 'ocr',
+            'tb_tool_make_pdf': 'make pdf',
+            'tb_tool_merge_pdf': 'merge pdfs',
+            'tb_tool_compress_pdf': 'compress pdf',
+            'tb_tool_transcribe': 'transcribe',
+        }
+        if choice in tool_commands:
+            synthetic = message.model_copy(update={'body': tool_commands[choice]})
+            try:
+                result = await self.tools.handle(synthetic)
+            except MediaProcessingError as exc:
+                await self._reply(message, f'⚠️ Tool failed: {exc}')
+                return True
+            if result.text:
+                await self._reply(message, result.text)
+            return True
+        if choice == 'tb_tool_resize':
+            await self._reply(message, '🖼 Send an image, then tell me the size, for example: `resize 1080x1080`.')
+            return True
+        if choice == 'tb_tool_qr':
+            await self._reply(message, '▣ Send `qr` followed by the text or URL, for example:\n`qr https://example.com`')
+            return True
+
+        return False
 
     async def _reply(self, message: NormalizedMessage, text: str) -> None:
         await self.waha.send_text(message.session_id, message.chat_id, text)

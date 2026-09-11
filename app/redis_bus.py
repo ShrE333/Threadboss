@@ -109,6 +109,39 @@ class EventBus:
         )
 
 
+    async def set_menu_state(self, session: str, chat_id: str, state: str) -> None:
+        await self.redis.set(
+            f'threadboss:menu_state:{session}:{chat_id}',
+            state,
+            ex=self.settings.menu_state_ttl_seconds,
+        )
+
+    async def get_menu_state(self, session: str, chat_id: str) -> str | None:
+        return await self.redis.get(f'threadboss:menu_state:{session}:{chat_id}')
+
+    async def clear_menu_state(self, session: str, chat_id: str) -> None:
+        await self.redis.delete(f'threadboss:menu_state:{session}:{chat_id}')
+
+    async def remember_menu_poll(
+        self, session: str, chat_id: str, poll_id: str, state: str
+    ) -> None:
+        key = f'threadboss:menu_poll:{session}:{poll_id}'
+        await self.redis.set(
+            key,
+            json.dumps({'chat_id': chat_id, 'state': state}),
+            ex=self.settings.menu_state_ttl_seconds,
+        )
+
+    async def get_menu_poll(self, session: str, poll_id: str) -> dict | None:
+        raw = await self.redis.get(f'threadboss:menu_poll:{session}:{poll_id}')
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     async def remember_attachment(self, session: str, chat_id: str, media: MediaRef) -> None:
         key = f'threadboss:attachments:{session}:{chat_id}'
         await self.redis.rpush(key, media.model_dump_json())

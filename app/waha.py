@@ -108,6 +108,67 @@ class WahaClient:
         except Exception:
             return {'ok': True}
 
+    async def send_list(
+        self,
+        session: str,
+        chat_id: str,
+        *,
+        title: str,
+        description: str,
+        button: str,
+        sections: list[dict[str, Any]],
+        footer: str = '',
+    ) -> dict[str, Any]:
+        response = await self._request(
+            'POST',
+            '/api/sendList',
+            json={
+                'session': session,
+                'chatId': normalize_jid(chat_id),
+                'reply_to': None,
+                'message': {
+                    'title': title,
+                    'description': description,
+                    'footer': footer,
+                    'button': button,
+                    'sections': sections,
+                },
+            },
+            headers={'Content-Type': 'application/json'},
+        )
+        try:
+            return response.json()
+        except Exception:
+            return {'ok': True}
+
+    async def send_poll(
+        self,
+        session: str,
+        chat_id: str,
+        *,
+        name: str,
+        options: list[str],
+        multiple_answers: bool = False,
+    ) -> dict[str, Any]:
+        response = await self._request(
+            'POST',
+            '/api/sendPoll',
+            json={
+                'session': session,
+                'chatId': normalize_jid(chat_id),
+                'poll': {
+                    'name': name,
+                    'options': options,
+                    'multipleAnswers': multiple_answers,
+                },
+            },
+            headers={'Content-Type': 'application/json'},
+        )
+        try:
+            return response.json()
+        except Exception:
+            return {'ok': True}
+
     async def send_file_bytes(
         self,
         session: str,
@@ -149,7 +210,7 @@ class WahaClient:
 
         webhook: dict[str, Any] = {
             'url': webhook_url,
-            'events': ['message.any'],
+            'events': ['message.any', 'poll.vote', 'poll.vote.failed'],
             'retries': {
                 'policy': 'exponential',
                 'delaySeconds': 2,
