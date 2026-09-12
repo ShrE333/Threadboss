@@ -289,3 +289,12 @@ README.md (section 4)
 ```
 
 They do not need the WAHA key, Gemini key, DB password, or ThreadBoss admin token in the frontend.
+
+## V1.7.1 live-demo deterministic flight handoff
+
+For the product demo only, these Message Yourself commands bypass LLM intent routing and return a deterministic Ixigo deep link after a 2-second handoff delay:
+
+- `Book me a ticket from Pune to Bangalore on 15 September 2026`
+- `Book me a ticket from Bangalore to Pune on 15 September 2026`
+
+The first command returns the exact PNQ→BLR Ixigo URL requested for the demo. The reverse command returns the equivalent BLR→PNQ route. `Banglore`, `Bengaluru`, `flight`, `ticket`, `15 Sept`, and `15 September 2026` are accepted variants.

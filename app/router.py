@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
 from .agent_runtime import AgentRuntime
 from .config import Settings
+from .demo_actions import match_demo_flight_action
 from .history_sync import HistorySyncService
 from .media_processor import MediaProcessingError, MediaProcessor
 from .menu import InteractiveMenu
@@ -51,6 +53,19 @@ class SelfChatRouter:
     async def handle(self, message: NormalizedMessage) -> None:
         body = message.body.strip()
         lowered = body.lower()
+
+        # Deterministic live-demo action: bypass LLM routing and return the exact
+        # Ixigo deep link after a short handoff delay so ThreadBoss Hands / the
+        # browser extension can take over reliably during the product demo.
+        demo_flight = match_demo_flight_action(body)
+        if demo_flight:
+            await self._reply(
+                message,
+                f'✈️ ThreadBoss Hands is preparing {demo_flight.origin} → {demo_flight.destination} for {demo_flight.date_label}…'
+            )
+            await asyncio.sleep(2)
+            await self._reply(message, demo_flight.url)
+            return
 
         if lowered in {'hi','hii','hiii','hello','hey','start','/start','menu','/menu','home'}:
             await self.menu.show_home(message); return
