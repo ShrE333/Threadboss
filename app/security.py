@@ -8,6 +8,16 @@ from fastapi import HTTPException, Request, status
 from .config import Settings
 
 
+def _bearer_or_header(request: Request, header_name: str) -> str:
+    supplied = request.headers.get(header_name, '')
+    if supplied:
+        return supplied
+    auth = request.headers.get('Authorization', '')
+    if auth.lower().startswith('bearer '):
+        return auth[7:].strip()
+    return ''
+
+
 def verify_waha_hmac(raw_body: bytes, request: Request, settings: Settings) -> None:
     key = settings.waha_webhook_hmac_key
     if not key:
@@ -24,16 +34,22 @@ def verify_waha_hmac(raw_body: bytes, request: Request, settings: Settings) -> N
 
 
 def verify_admin_token(request: Request, settings: Settings) -> None:
-    supplied = request.headers.get('X-ThreadBoss-Admin', '')
+    supplied = _bearer_or_header(request, 'X-ThreadBoss-Admin')
     if not settings.admin_token or not hmac.compare_digest(supplied, settings.admin_token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid admin token')
 
 
-def verify_channel_api_key(request: Request, settings: Settings) -> None:
-    supplied = request.headers.get('X-ThreadBoss-Key', '')
-    if not supplied:
-        auth = request.headers.get('Authorization', '')
-        if auth.lower().startswith('bearer '):
-            supplied = auth[7:].strip()
+def verify_onboarding_api_key(request: Request, settings: Settings) -> None:
+    supplied = _bearer_or_header(request, 'X-ThreadBoss-Onboarding-Key')
+    if not settings.onboarding_api_key or not hmac.compare_digest(supplied, settings.onboarding_api_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid onboarding API key')
+
+
+def extract_channel_token(request: Request) -> str:
+    return _bearer_or_header(request, 'X-ThreadBoss-Key')
+
+
+def verify_legacy_channel_api_key(request: Request, settings: Settings) -> None:
+    supplied = extract_channel_token(request)
     if not settings.channel_api_key or not hmac.compare_digest(supplied, settings.channel_api_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid ThreadBoss channel API key')

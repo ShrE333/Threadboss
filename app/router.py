@@ -15,7 +15,7 @@ from .waha import WahaClient
 
 logger = logging.getLogger(__name__)
 
-HELP_TEXT = """🧠 ThreadBoss V1.6
+HELP_TEXT = """🧠 ThreadBoss V1.7
 
 Type *hi* or *menu* to open the native WhatsApp menu.
 
@@ -67,7 +67,7 @@ class SelfChatRouter:
             mem = await self.runtime.db.memory_stats(message.tenant_id)
             await self._reply(
                 message,
-                '✅ ThreadBoss V1.6 is online.\n'
+                '✅ ThreadBoss V1.7 is online.\n'
                 f'Knowledge: {self.settings.knowledge_provider}/{self.settings.knowledge_model}\n'
                 f'Embedding: {self.settings.embedding_provider}/{self.settings.embedding_model}\n'
                 f'Indexed messages: {mem.get("with_text",0)}\n'

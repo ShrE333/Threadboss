@@ -113,7 +113,7 @@ class KnowledgeAgent:
                     agent='knowledge',
                     answer=(
                         'I could not find indexed messages in that time range. '
-                        'ThreadBoss V1.6 normally auto-syncs temporal questions; '
+                        'ThreadBoss V1.7 normally auto-syncs temporal questions; '
                         'use `/memory stats` to inspect the local memory range.'
                     ),
                     sources=[],

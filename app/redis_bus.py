@@ -93,10 +93,10 @@ class EventBus:
         await self.redis.delete(f'threadboss:dedupe:{event_id}')
 
     async def is_initial_backfill_done(self, session: str) -> bool:
-        return bool(await self.redis.get(f'threadboss:backfill_done:v1.6:{session}'))
+        return bool(await self.redis.get(f'threadboss:backfill_done:v1.7-neon:{session}'))
 
     async def mark_initial_backfill_done(self, session: str) -> None:
-        await self.redis.set(f'threadboss:backfill_done:v1.6:{session}', '1')
+        await self.redis.set(f'threadboss:backfill_done:v1.7-neon:{session}', '1')
 
     async def get_owner(self, session: str) -> str | None:
         return await self.redis.get(f'threadboss:owner:{session}')
@@ -174,11 +174,11 @@ class EventBus:
 
 
     async def is_temporal_sync_fresh(self, session: str, start_iso: str, end_iso: str) -> bool:
-        key = f'threadboss:temporal_sync:{session}:{start_iso}:{end_iso}'
+        key = f'threadboss:temporal_sync:v1.7:{session}:{start_iso}:{end_iso}'
         return bool(await self.redis.get(key))
 
     async def mark_temporal_sync_fresh(self, session: str, start_iso: str, end_iso: str) -> None:
-        key = f'threadboss:temporal_sync:{session}:{start_iso}:{end_iso}'
+        key = f'threadboss:temporal_sync:v1.7:{session}:{start_iso}:{end_iso}'
         await self.redis.set(key, '1', ex=self.settings.temporal_sync_cache_seconds)
 
     async def close(self) -> None:

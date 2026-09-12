@@ -1,21 +1,4 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      POSTGRES_DB: threadboss
-      POSTGRES_USER: threadboss
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U threadboss -d threadboss"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 15s
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -38,8 +21,6 @@ services:
       - .env
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -58,14 +39,11 @@ services:
       - .env
     command: python -m app.worker
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
       - whisper_cache:/root/.cache/huggingface
 
 volumes:
-  postgres_data:
   redis_data:
   whisper_cache:

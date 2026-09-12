@@ -285,7 +285,7 @@ class WahaClient:
 
         webhook: dict[str, Any] = {
             'url': webhook_url,
-            'events': ['message.any', 'poll.vote', 'poll.vote.failed'],
+            'events': ['message.any', 'poll.vote', 'poll.vote.failed', 'session.status'],
             'retries': {
                 'policy': 'exponential',
                 'delaySeconds': 2,
@@ -307,3 +307,58 @@ class WahaClient:
             },
             headers={'Content-Type': 'application/json'},
         )
+
+    async def create_session_for_tenant(self, session: str, webhook_url: str, tenant_id: str) -> dict[str, Any]:
+        """Create/start a WAHA session for website onboarding.
+
+        WAHA supports multiple sessions in one container. We configure ThreadBoss
+        webhooks at creation time so the browser never needs direct WAHA access.
+        """
+        webhook: dict[str, Any] = {
+            'url': webhook_url,
+            'events': ['message.any', 'poll.vote', 'poll.vote.failed', 'session.status'],
+            'retries': {'policy': 'exponential', 'delaySeconds': 2, 'attempts': 8},
+        }
+        if self.settings.waha_webhook_hmac_key:
+            webhook['hmac'] = {'key': self.settings.waha_webhook_hmac_key}
+
+        payload = {
+            'name': session,
+            'start': True,
+            'config': {
+                'metadata': {
+                    'threadbossTenantId': str(tenant_id),
+                },
+                'webhooks': [webhook],
+            },
+        }
+        try:
+            response = await self._request(
+                'POST', '/api/sessions', json=payload,
+                headers={'Content-Type': 'application/json'},
+            )
+            return response.json()
+        except WahaError as exc:
+            # A retry after the website refreshed may race with an existing
+            # session. If it exists, return it instead of creating duplicates.
+            if exc.status_code in {400, 409, 422}:
+                return await self.get_session(session)
+            raise
+
+    async def get_qr_base64(self, session: str) -> dict[str, Any]:
+        response = await self._request(
+            'GET', f'/api/{session}/auth/qr',
+            headers={'Accept': 'application/json'},
+        )
+        data = response.json()
+        if not isinstance(data, dict) or not data.get('data'):
+            raise WahaError(f"WAHA did not return a QR image for session '{session}'")
+        return data
+
+    async def logout_and_delete_session(self, session: str) -> None:
+        try:
+            await self._request('DELETE', f'/api/sessions/{session}')
+        except WahaError as exc:
+            if exc.status_code == 404:
+                return
+            raise
