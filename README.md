@@ -1,228 +1,132 @@
-# ThreadBoss V1.4 — Native WhatsApp Menu + Agents Core
+# ThreadBoss V1.5 — Reliable Memory
 
-V1.4 keeps the in-house agent backend from V1.3 and adds a tap-first native WhatsApp control menu. V1.3 removed the teammate/mock Knowledge Agent. The real agent backend now lives inside ThreadBoss and is shared by **WhatsApp, Slack, and Telegram**.
+V1.5 fixes the two production issues seen in V1.4 and makes the Knowledge Agent useful for time-based questions and media-heavy WhatsApp chats.
 
+## What V1.5 fixes
 
-## V1.4 native WhatsApp menu
+1. **Gemini generation 404s**
+   - Defaults move from `gemini-2.5-flash-lite` to `gemini-3.1-flash-lite`.
+   - If an old EasyPanel env still points at a 2.5 model and Google returns 404, the AI client automatically retries with `GEMINI_FALLBACK_MODEL`.
+   - `gemini-embedding-001` remains unchanged.
 
-In **Message Yourself**, send `hi`, `hello`, `start`, or `menu`. ThreadBoss first tries WAHA `POST /api/sendList` and shows a native selectable WhatsApp list. If list messages are unavailable for the installed WAHA tier/engine, ThreadBoss automatically falls back to a single-choice WhatsApp poll, then to plain text only if both interactive transports fail.
+2. **Transient WAHA DNS failures**
+   - WAHA requests retry with exponential backoff for connection/DNS/timeouts and 502/503/504 responses.
+   - Worker event dedupe claims are released on processing failure, so a retry actually retries instead of being discarded as a duplicate.
 
-Home menu:
+3. **Weak RAG fallback**
+   - If text generation is temporarily unavailable, ThreadBoss now returns several real evidence snippets with sender and timestamp instead of a blank `I found this relevant message` response.
 
-- 🧠 Ask Memory
-- 🤖 Agents
-- 🛠 Tools
-- ✅ Tasks
-- 🔔 Follow-ups
+## New memory behavior
 
-Selecting **Agents** opens a second native menu for Knowledge, Planner, Follow-up and Action. Selecting **Tools** opens OCR, image-to-PDF, merge/compress PDF, resize, QR and transcription. Existing slash commands remain available.
+- `yesterday`, `today`, `this week`, and `last N days` are interpreted as real time ranges using `DEFAULT_TIMEZONE`.
+- Questions such as `What messages did I receive yesterday that are important?` search the full time window, not just semantic top-K.
+- `received` / `incoming` questions exclude messages sent by the owner.
+- Normal-chat images and documents are indexed locally using OCR/text extraction by default.
+- Normal-chat audio transcription stays opt-in because Whisper is CPU-heavy.
+- If the user selected **Ask Memory** and refers to a recent self-chat image/poster/file, ThreadBoss can use the recent attachment as context.
 
-V1.4 also configures `poll.vote` webhooks so the interactive poll fallback can be handled without typing a command. Menu state is kept in Redis for 10 minutes by default.
+## History backfill
 
-Environment:
+WAHA GOWS supports fetching messages across all chats with `chatId=all`.
+
+V1.5 adds:
+
+```text
+/sync 24h
+/sync 7d
+```
+
+On the first successful session bootstrap, ThreadBoss also schedules a one-time backfill using:
 
 ```env
-INTERACTIVE_MENU_ENABLED=true
-INTERACTIVE_MENU_POLL_FALLBACK=true
-MENU_STATE_TTL_SECONDS=600
+INITIAL_BACKFILL_HOURS=24
+INITIAL_BACKFILL_MAX_MESSAGES=1500
 ```
 
-After upgrading, run the existing session bootstrap once so WAHA's webhook subscription is updated from only `message.any` to include `poll.vote` / `poll.vote.failed`.
+This prevents a newly connected ThreadBoss account from starting with an empty memory.
 
-## Architecture
+## Important EasyPanel model settings
 
-```text
-WhatsApp / WAHA ─┐
-Slack adapter ────┼──> ThreadBoss Agent Backend
-Telegram adapter ─┘          │
-                              ├── Knowledge Agent (RAG)
-                              ├── Planner Agent (task extraction)
-                              ├── Follow-up Agent
-                              ├── Action Agent (safe planning mode)
-                              └── Tool Engine
-                                      │
-                       ┌──────────────┼───────────────┐
-                       │              │               │
-                    pgvector        Redis        Local media tools
-                   Postgres                      Whisper/Tesseract
-```
-
-## What is new
-
-- **Real Knowledge Agent**: stores messages in Postgres/pgvector, creates embeddings, retrieves relevant messages, and generates grounded answers.
-- **Planner Agent**: looks at action-like incoming messages and extracts tasks/commitments.
-- **Follow-up Agent**: surfaces overdue/upcoming/undated commitments.
-- **Action Agent**: included in confirmation-first planning mode. V1.3 deliberately does not silently send/pay/book anything.
-- **Shared channel API**: Slack and Telegram adapters use the exact same agent backend via `/v1/messages` and `/v1/query`.
-- **V1.2 tools preserved**: OCR, local Whisper STT, image-to-PDF, merge/compress PDF, resize image, QR generation.
-- **GOWS @lid self-chat fix preserved**.
-
-## Free AI configuration
-
-V1.3 requires **no paid OpenAI/Anthropic API**. Defaults are chosen from services that offer free allocations/tiers. Free quotas are not unlimited and providers can change them.
-
-| Capability | Default | Cost approach |
-|---|---|---|
-| Knowledge LLM | Gemini 2.5 Flash-Lite | Google AI Studio free tier |
-| Planner LLM | Gemini 2.5 Flash-Lite | Google AI Studio free tier |
-| Embeddings | Gemini Embedding 001, 768 dims | Google AI Studio free tier |
-| Router (optional) | Cloudflare GLM-4.7-Flash | Workers AI free allocation |
-| Groq fallback option | Qwen / GPT-OSS family | Groq Free plan |
-| OCR | Tesseract | runs locally |
-| STT | faster-whisper base | runs locally |
-| PDF/image tools | OSS libraries | runs locally |
-| Vector DB | pgvector/Postgres | runs on your current GCP VM |
-
-For the default configuration you only need a **free `GEMINI_API_KEY`**. Cloudflare and Groq credentials are optional.
-
-> Privacy note: free hosted AI tiers send the selected prompt/evidence to the provider. If you later want chat content to remain entirely on your infrastructure, switch the provider layer to a local model.
-
-## Environment files
-
-- `.env.example` — local/dev template.
-- `.env.easypanel.example` — paste into **EasyPanel → threadboss → Environment** and enable **Create .env file**.
-- `env/slack-telegram-adapter.env.example` — for the separate Slack/Telegram adapter. The adapter does **not** need Gemini/Cloudflare/Groq keys.
-
-Generate secrets in PowerShell:
-
-```powershell
-[guid]::NewGuid().ToString("N")
-```
-
-Use separate values for `ADMIN_TOKEN`, `CHANNEL_API_KEY`, and `WAHA_WEBHOOK_HMAC_KEY`.
-
-## Upgrade from V1.2 on EasyPanel
-
-1. Back up your currently working repo.
-2. Replace the repo files with V1.3 and push to GitHub.
-3. In **threadboss → Environment**, merge the variables from `.env.easypanel.example` with your working WAHA values.
-4. Set `GEMINI_API_KEY` using a free Google AI Studio key.
-5. Keep **Create .env file = ON**.
-6. Deploy **ThreadBoss only**. Do not redeploy WAHA.
-7. V1.3 adds a `postgres` container automatically.
-8. If EasyPanel leaves the Compose service stopped after deployment, click **Start**.
-
-Verify:
-
-```powershell
-$TB="https://YOUR-THREADBOSS-DOMAIN"
-Invoke-RestMethod "$TB/health" | ConvertTo-Json
-Invoke-RestMethod "$TB/ready" | ConvertTo-Json
-```
-
-`/ready` should report both Redis and database as ready.
-
-Your existing WAHA webhook URL is unchanged. You normally do not need to bootstrap again, but it is safe to do so after the upgrade:
-
-```powershell
-Invoke-RestMethod `
-  -Method POST `
-  -Uri "$TB/admin/sessions/YOUR_WAHA_SESSION/bootstrap?configure_webhook=true" `
-  -Headers @{"X-ThreadBoss-Admin"=$ADMIN} | ConvertTo-Json -Depth 10
-```
-
-## WhatsApp tests
-
-In **Message Yourself**:
-
-```text
-/status
-/agents
-/tasks
-/followups
-/memory what did professor say about the review?
-```
-
-Normal DMs/groups are silent data-plane inputs. ThreadBoss will not reply into them.
-
-Try a normal conversation containing something actionable, for example:
-
-```text
-Please submit the report by Friday.
-```
-
-After it is ingested, use Message Yourself:
-
-```text
-/tasks
-```
-
-The Planner Agent only invokes the LLM when a message looks actionable, which reduces free-tier quota usage.
-
-## API for Slack / Telegram
-
-The other channel adapters should contain **no agents**. They only normalize their platform events and call ThreadBoss.
-
-Authenticate with either:
-
-```text
-X-ThreadBoss-Key: <CHANNEL_API_KEY>
-```
-
-or:
-
-```text
-Authorization: Bearer <CHANNEL_API_KEY>
-```
-
-### Ingest a message
-
-`POST /v1/messages`
-
-```json
-{
-  "tenant_id": "tenant_shriram",
-  "channel": "slack",
-  "session_id": "workspace_T123",
-  "chat_id": "C123",
-  "chat_type": "channel",
-  "sender_id": "U123",
-  "message_id": "1712345.100",
-  "timestamp": "2026-09-11T14:00:00+05:30",
-  "text": "Submit the deck by Friday",
-  "from_me": false
-}
-```
-
-### Ask the agent team
-
-`POST /v1/query`
-
-```json
-{
-  "tenant_id": "tenant_shriram",
-  "channel": "telegram",
-  "session_id": "telegram-main",
-  "chat_id": "123456",
-  "question": "What deadlines do I have?"
-}
-```
-
-Response:
-
-```json
-{
-  "answer": "...",
-  "agent": "planner",
-  "sources": []
-}
-```
-
-The same `tenant_id` can therefore aggregate a user's WhatsApp + Slack + Telegram memory if that is the behavior you want. Use different tenant IDs when data must remain isolated.
-
-## Agent routing
-
-To save quota, AI routing is OFF by default:
+Use:
 
 ```env
-ENABLE_AI_ROUTER=false
+KNOWLEDGE_PROVIDER=gemini
+KNOWLEDGE_MODEL=gemini-3.1-flash-lite
+
+PLANNER_PROVIDER=gemini
+PLANNER_MODEL=gemini-3.1-flash-lite
+
+ACTION_PROVIDER=gemini
+ACTION_MODEL=gemini-3.1-flash-lite
+
+VISION_PROVIDER=gemini
+VISION_MODEL=gemini-3.1-flash-lite
+
+GEMINI_FALLBACK_MODEL=gemini-3.1-flash-lite
+
+EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=gemini-embedding-001
+EMBEDDING_DIM=768
 ```
 
-Deterministic rules handle `/tasks`, `/followups`, `/action`, `/memory`; everything else defaults to the Knowledge Agent. You can enable Cloudflare-powered routing later.
+Additional V1.5 settings:
 
-## V1.3 boundaries
+```env
+DEFAULT_TIMEZONE=Asia/Kolkata
+KNOWLEDGE_SUMMARY_LIMIT=120
 
-- Action Agent is **planning-only** until we implement explicit confirmation/execution.
-- Follow-up Agent can report follow-ups; scheduled proactive notifications come in the next scheduler version.
-- No automatic history backfill yet.
-- Free hosted API quotas can return 429/403 when exhausted; ThreadBoss keeps raw messages even when an embedding/model call temporarily fails.
+INITIAL_BACKFILL_HOURS=24
+INITIAL_BACKFILL_MAX_MESSAGES=1500
+HISTORY_SYNC_PAGE_SIZE=100
+
+INDEX_NORMAL_CHAT_IMAGES=true
+INDEX_NORMAL_CHAT_DOCUMENTS=true
+INDEX_NORMAL_CHAT_AUDIO=false
+
+WAHA_REQUEST_RETRIES=4
+WAHA_RETRY_BASE_SECONDS=0.75
+```
+
+## Upgrade from V1.4
+
+Copy/replace the V1.5 project files over the V1.4 repo. Keep the existing real EasyPanel secrets and persistent Postgres/Redis volumes.
+
+Then:
+
+```powershell
+git add .
+git commit -m "Upgrade ThreadBoss to V1.5 reliable memory"
+git push
+```
+
+Redeploy ThreadBoss only.
+
+Update the model env values shown above, then bootstrap once so the webhook is confirmed and the initial history sync is scheduled.
+
+## Test order
+
+In Message Yourself:
+
+```text
+hi
+```
+
+Use **Ask Memory**, then test:
+
+```text
+What messages did I receive yesterday that you think are important?
+```
+
+Then:
+
+```text
+/sync 24h
+```
+
+After sync, test a known fact from a recent chat or event poster.
+
+## Validation
+
+- All Python modules compile successfully.
+- The existing identity, normalizer, interactive-menu, and media tests pass: `15 passed` in the available test environment.
+- Full test collection also requires the Redis Python package; package installation was unavailable in the build sandbox because DNS access to PyPI was temporarily unavailable.

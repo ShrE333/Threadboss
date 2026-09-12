@@ -35,6 +35,10 @@ async def run() -> None:
                 break
             except Exception as exc:
                 last_error = exc
+                # V1.4 claimed the event before processing. That made retries get
+                # discarded as duplicates after a transient WAHA/DNS failure.
+                # Release the claim so the next attempt actually runs again.
+                await bus.release_event_claim(message.event_id)
                 logger.exception(
                     'Processing attempt %s/%s failed for Redis event %s',
                     attempt, settings.worker_max_attempts, redis_id,

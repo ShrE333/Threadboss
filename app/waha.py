@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urljoin
@@ -9,6 +11,8 @@ import httpx
 
 from .config import Settings
 from .ids import normalize_jid
+
+logger = logging.getLogger(__name__)
 
 
 class WahaError(RuntimeError):
@@ -34,18 +38,44 @@ class WahaClient:
         headers = dict(self.headers)
         headers.update(kwargs.pop('headers', {}))
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.request(method, url, headers=headers, **kwargs)
-        except httpx.HTTPError as exc:
-            raise WahaError(f'WAHA {method} {path} request failed: {exc}') from exc
+        attempts = max(1, int(self.settings.waha_request_retries))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.request(method, url, headers=headers, **kwargs)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                last_error = exc
+                if attempt < attempts:
+                    delay = self.settings.waha_retry_base_seconds * (2 ** (attempt - 1))
+                    logger.warning(
+                        'Transient WAHA network error (%s/%s) for %s %s: %s; retrying in %.2fs',
+                        attempt, attempts, method, path, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise WahaError(f'WAHA {method} {path} request failed after {attempts} attempts: {exc}') from exc
+            except httpx.HTTPError as exc:
+                raise WahaError(f'WAHA {method} {path} request failed: {exc}') from exc
 
-        if response.is_error:
-            raise WahaError(
-                f'WAHA {method} {path} failed: {response.status_code} {response.text[:500]}',
-                status_code=response.status_code,
-            )
-        return response
+            # Retry gateway/service transient failures as well. Do not retry 4xx.
+            if response.status_code in {502, 503, 504} and attempt < attempts:
+                delay = self.settings.waha_retry_base_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    'Transient WAHA HTTP %s (%s/%s) for %s %s; retrying in %.2fs',
+                    response.status_code, attempt, attempts, method, path, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if response.is_error:
+                raise WahaError(
+                    f'WAHA {method} {path} failed: {response.status_code} {response.text[:500]}',
+                    status_code=response.status_code,
+                )
+            return response
+
+        raise WahaError(f'WAHA {method} {path} request failed: {last_error}')
 
     async def get_me(self, session: str) -> dict[str, Any]:
         response = await self._request('GET', f'/api/sessions/{session}/me')
@@ -91,6 +121,29 @@ class WahaClient:
     async def get_session(self, session: str) -> dict[str, Any]:
         response = await self._request('GET', f'/api/sessions/{session}')
         return response.json()
+
+    async def get_messages_since(
+        self,
+        session: str,
+        since_timestamp: int,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        download_media: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch history across all chats. GOWS supports chatId=all."""
+        response = await self._request(
+            'GET',
+            f'/api/{session}/chats/all/messages',
+            params={
+                'limit': int(limit),
+                'offset': int(offset),
+                'filter.timestamp.gte': int(since_timestamp),
+                'downloadMedia': str(bool(download_media)).lower(),
+            },
+        )
+        data = response.json()
+        return data if isinstance(data, list) else []
 
     async def send_text(self, session: str, chat_id: str, text: str) -> dict[str, Any]:
         response = await self._request(

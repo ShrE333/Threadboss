@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -7,7 +8,9 @@ from fastapi import FastAPI, HTTPException, Request
 
 from .agent_runtime import AgentRuntime
 from .config import get_settings
+from .history_sync import HistorySyncService
 from .ids import normalize_jid
+from .media_processor import MediaProcessor
 from .models import (
     AgentQueryRequest,
     AgentQueryResponse,
@@ -24,10 +27,13 @@ settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title=settings.app_name, version='1.4.0')
+app = FastAPI(title=settings.app_name, version='1.5.0')
 bus = EventBus(settings)
 waha = WahaClient(settings)
 runtime = AgentRuntime(settings)
+media = MediaProcessor(settings)
+history = HistorySyncService(settings, waha, runtime, media)
+background_tasks: set[asyncio.Task] = set()
 
 
 @app.get('/health', response_model=HealthResponse)
@@ -148,6 +154,29 @@ async def waha_webhook(request: Request) -> dict:
     }
 
 
+async def _run_initial_backfill(session: str, tenant_id: str, owner_id: str, owner_lid: str | None) -> None:
+    if settings.initial_backfill_hours <= 0:
+        return
+    if await bus.is_initial_backfill_done(session):
+        return
+    try:
+        result = await history.sync(
+            session=session,
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            owner_lid=owner_lid,
+            hours=settings.initial_backfill_hours,
+            max_messages=settings.initial_backfill_max_messages,
+        )
+        await bus.mark_initial_backfill_done(session)
+        logger.info('Initial WAHA history backfill complete for %s: %s', session, result)
+    except Exception:
+        # Do not fail WhatsApp onboarding just because history sync failed. The
+        # user can retry later with /sync 24h or /sync 7d.
+        logger.exception('Initial WAHA history backfill failed for %s', session)
+
+
+
 @app.post('/admin/sessions/{session}/bootstrap', response_model=SessionBootstrapResponse)
 async def bootstrap_session(session: str, request: Request, configure_webhook: bool = True):
     verify_admin_token(request, settings)
@@ -170,6 +199,14 @@ async def bootstrap_session(session: str, request: Request, configure_webhook: b
         await runtime.db.ensure()
     except WahaError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # First successful bootstrap warms the Knowledge Agent with recent history in
+    # the background. It is idempotent because DB inserts are unique and Redis
+    # stores a completion marker.
+    task = asyncio.create_task(_run_initial_backfill(session, tenant_id, owner_id, owner_lid))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+
     return SessionBootstrapResponse(
         session=session,
         tenant_id=tenant_id,

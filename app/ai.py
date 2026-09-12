@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import httpx
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class AIUnavailable(RuntimeError):
@@ -36,14 +39,16 @@ def _extract_json(text: str) -> Any:
 
 
 class AIClient:
-    """Small provider abstraction using only free-tier-friendly providers.
+    """Free-tier-friendly provider abstraction.
 
-    Supported providers:
+    Providers:
       - gemini: Google AI Studio free tier (quota-limited)
-      - groq: Groq Free plan (quota-limited)
-      - cloudflare: Workers AI free allocation (10k neurons/day at time of build)
+      - groq: Groq free plan (quota-limited)
+      - cloudflare: Workers AI free allocation (quota-limited)
 
-    The service never automatically switches to a paid API.
+    ThreadBoss never silently enables a paid API. V1.5 also has a Gemini model
+    fallback because Google currently limits some new projects from generating
+    with older 2.5 models even though embeddings still work.
     """
 
     def __init__(self, settings: Settings):
@@ -83,10 +88,23 @@ class AIClient:
             return await self._cloudflare_embed(text)
         raise AIUnavailable(f'Unsupported embedding provider: {provider}')
 
-    async def _gemini_chat(self, model: str, system: str, user: str, temperature: float, max_tokens: int) -> AIResponse:
+    async def _gemini_chat(
+        self,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> AIResponse:
         if not self.settings.gemini_api_key:
             raise AIUnavailable('GEMINI_API_KEY is not configured')
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+
+        candidates: list[str] = []
+        for candidate in (model, self.settings.gemini_fallback_model):
+            candidate = (candidate or '').strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
         body = {
             'systemInstruction': {'parts': [{'text': system}]},
             'contents': [{'role': 'user', 'parts': [{'text': user}]}],
@@ -95,21 +113,45 @@ class AIClient:
                 'maxOutputTokens': max_tokens,
             },
         }
-        headers = {'x-goog-api-key': self.settings.gemini_api_key, 'Content-Type': 'application/json'}
-        try:
-            async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
-                r = await client.post(url, headers=headers, json=body)
-            r.raise_for_status()
-            data = r.json()
-            parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-            text = ''.join(str(p.get('text', '')) for p in parts).strip()
-            if not text:
-                raise AIUnavailable('Gemini returned an empty response')
-            return AIResponse(text=text, provider='gemini', model=model)
-        except AIUnavailable:
-            raise
-        except Exception as exc:
-            raise AIUnavailable(f'Gemini request failed: {exc}') from exc
+        headers = {
+            'x-goog-api-key': self.settings.gemini_api_key,
+            'Content-Type': 'application/json',
+        }
+
+        last_error: Exception | None = None
+        for index, candidate in enumerate(candidates):
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/{candidate}:generateContent'
+            try:
+                async with httpx.AsyncClient(timeout=self.settings.ai_timeout_seconds) as client:
+                    r = await client.post(url, headers=headers, json=body)
+
+                # New Google AI Studio projects can return 404 for legacy 2.5
+                # generation models while embeddings still work. Retry the known
+                # free-tier fallback instead of returning a useless RAG snippet.
+                if r.status_code == 404 and index + 1 < len(candidates):
+                    logger.warning(
+                        'Gemini generation model %s returned 404; retrying with %s',
+                        candidate,
+                        candidates[index + 1],
+                    )
+                    continue
+
+                r.raise_for_status()
+                data = r.json()
+                parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+                text = ''.join(str(p.get('text', '')) for p in parts).strip()
+                if not text:
+                    raise AIUnavailable(f'Gemini {candidate} returned an empty response')
+                return AIResponse(text=text, provider='gemini', model=candidate)
+            except AIUnavailable:
+                raise
+            except Exception as exc:
+                last_error = exc
+                # Only model-not-found automatically changes model. Network/quota
+                # errors are surfaced so caller can use deterministic fallback.
+                break
+
+        raise AIUnavailable(f'Gemini request failed: {last_error}') from last_error
 
     async def _gemini_embed(self, text: str, task_type: str) -> list[float]:
         if not self.settings.gemini_api_key:

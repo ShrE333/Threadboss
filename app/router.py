@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from .agent_runtime import AgentRuntime
 from .config import Settings
+from .history_sync import HistorySyncService
 from .media_processor import MediaProcessingError, MediaProcessor
 from .menu import InteractiveMenu
 from .models import NormalizedMessage
@@ -14,7 +16,7 @@ from .waha import WahaClient
 logger = logging.getLogger(__name__)
 
 
-HELP_TEXT = """🧠 ThreadBoss V1.4
+HELP_TEXT = """🧠 ThreadBoss V1.5
 
 Type *hi* or *menu* to open the native WhatsApp menu.
 
@@ -26,6 +28,8 @@ Quick commands still work:
 /followups — pending/overdue items
 /memory <question> — force Knowledge Agent
 /tools — open Tools menu
+/sync 24h — backfill recent WhatsApp history
+/sync 7d — backfill the last 7 days
 
 Normal chats/groups are indexed silently. ThreadBoss replies only in Message Yourself.
 """.strip()
@@ -41,6 +45,7 @@ class SelfChatRouter:
         self.media = media
         self.tools = ToolEngine(settings, bus, waha, media)
         self.menu = InteractiveMenu(settings, bus, waha)
+        self.history = HistorySyncService(settings, waha, runtime, media)
 
     async def handle(self, message: NormalizedMessage) -> None:
         body = message.body.strip()
@@ -61,7 +66,7 @@ class SelfChatRouter:
             stats = await self.runtime.db.task_stats(message.tenant_id)
             await self._reply(
                 message,
-                '✅ ThreadBoss V1.4 is online.\n'
+                '✅ ThreadBoss V1.5 is online.\n'
                 f'Session: {message.session_id}\nTenant: {message.tenant_id}\n'
                 f'Knowledge: {self.settings.knowledge_provider}/{self.settings.knowledge_model}\n'
                 f'Embedding: {self.settings.embedding_provider}/{self.settings.embedding_model}\n'
@@ -76,6 +81,25 @@ class SelfChatRouter:
             return
         if lowered in {'/tools', 'tools', 'threadboss tools'}:
             await self.menu.show_tools(message)
+            return
+
+        if lowered.startswith('/sync') or lowered.startswith('sync '):
+            hours = self._parse_sync_hours(lowered)
+            await self._reply(message, f'🔄 Syncing the last {self._human_hours(hours)} of WhatsApp history…')
+            result = await self.history.sync(
+                session=message.session_id,
+                tenant_id=message.tenant_id,
+                owner_id=message.owner_id,
+                owner_lid=message.owner_lid,
+                hours=hours,
+            )
+            await self._reply(
+                message,
+                '✅ Memory sync complete.\n'
+                f'Fetched: {result["fetched"]}\n'
+                f'New memories: {result["ingested"]}\n'
+                f'Media extracted: {result["media_enriched"]}',
+            )
             return
 
         try:
@@ -99,6 +123,13 @@ class SelfChatRouter:
             except MediaProcessingError as exc:
                 await self._reply(message, f'⚠️ Attachment processing failed: {exc}')
                 return
+        elif await self._should_use_recent_attachment(message, body):
+            refs = await self.bus.recent_attachments(message.session_id, message.chat_id)
+            if refs:
+                try:
+                    media_context = await self.media.context_for_media(refs[-1], body)
+                except MediaProcessingError as exc:
+                    logger.warning('Recent attachment context failed: %s', exc)
 
         if not body and not media_context:
             return
@@ -117,6 +148,7 @@ class SelfChatRouter:
             await self.menu.show_home(message)
             return True
         if choice == 'tb_home_memory':
+            await self.bus.set_menu_state(message.session_id, message.chat_id, 'memory')
             await self._reply(message, '🧠 Ask Memory\n\nSend me your question, for example:\n“What did my professor say about the robotics review?”')
             return True
         if choice == 'tb_home_agents':
@@ -135,6 +167,7 @@ class SelfChatRouter:
             return True
 
         if choice == 'tb_agent_knowledge':
+            await self.bus.set_menu_state(message.session_id, message.chat_id, 'memory')
             await self._reply(message, '🧠 Knowledge Agent selected.\nAsk any question about your indexed chats and I’ll retrieve the evidence.')
             return True
         if choice == 'tb_agent_planner':
@@ -146,7 +179,7 @@ class SelfChatRouter:
             await self._reply(message, result.answer)
             return True
         if choice == 'tb_agent_action':
-            await self._reply(message, '⚡ Action Agent selected.\nTell me what you want to do. V1.4 stays confirmation-first and will not silently execute risky actions.')
+            await self._reply(message, '⚡ Action Agent selected.\nTell me what you want to do. V1.5 stays confirmation-first and will not silently execute risky actions.')
             return True
 
         tool_commands = {
@@ -174,6 +207,32 @@ class SelfChatRouter:
             return True
 
         return False
+
+    @staticmethod
+    def _parse_sync_hours(text: str) -> int:
+        match = re.search(r'(\d{1,3})\s*(h|hr|hrs|hour|hours|d|day|days)\b', text, flags=re.I)
+        if not match:
+            return 24
+        value = max(1, int(match.group(1)))
+        unit = match.group(2).lower()
+        hours = value * 24 if unit.startswith('d') else value
+        return min(hours, 24 * 30)
+
+    @staticmethod
+    def _human_hours(hours: int) -> str:
+        if hours % 24 == 0:
+            days = hours // 24
+            return f'{days} day' + ('s' if days != 1 else '')
+        return f'{hours} hours'
+
+    async def _should_use_recent_attachment(self, message: NormalizedMessage, body: str) -> bool:
+        state = await self.bus.get_menu_state(message.session_id, message.chat_id)
+        q = body.lower()
+        referential = bool(re.search(
+            r'\b(image|photo|picture|screenshot|poster|event|file|document|pdf|attachment|this|it)\b',
+            q,
+        ))
+        return state == 'memory' and referential
 
     async def _reply(self, message: NormalizedMessage, text: str) -> None:
         await self.waha.send_text(message.session_id, message.chat_id, text)

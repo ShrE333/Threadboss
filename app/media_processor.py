@@ -192,6 +192,36 @@ class MediaProcessor:
             logger.warning("Gemini vision failed, falling back to OCR: %s", exc)
             return None
 
+    async def context_for_memory(self, media: MediaRef) -> str:
+        """Local-first extraction for passive knowledge indexing.
+
+        Unlike self-chat vision, this avoids spending Gemini requests on every
+        image received in normal chats. Images/docs use OCR/text extraction;
+        audio uses local Whisper only when enabled by settings.
+        """
+        data, mimetype, filename = await self.download(media)
+        lower = filename.lower()
+        if mimetype.startswith("audio/") or lower.endswith((".ogg", ".opus", ".mp3", ".wav", ".m4a", ".aac")):
+            if not self.settings.index_normal_chat_audio:
+                return ""
+            transcript = await self.transcribe(data, filename)
+            return f"Voice-note transcript:\n{transcript}".strip()
+
+        if mimetype.startswith("image/"):
+            if not self.settings.index_normal_chat_images:
+                return ""
+            text = await self.extract_text(data, mimetype, filename)
+            return f"Image OCR text:\n{text}" if text else ""
+
+        if not self.settings.index_normal_chat_documents:
+            return ""
+        text = await self.extract_text(data, mimetype, filename)
+        if text:
+            if len(text) > self.settings.media_context_max_chars:
+                text = text[: self.settings.media_context_max_chars] + "\n[truncated]"
+            return f"Attachment '{filename}' extracted text:\n{text}"
+        return ""
+
     async def context_for_media(self, media: MediaRef, user_prompt: str = "") -> str:
         data, mimetype, filename = await self.download(media)
 

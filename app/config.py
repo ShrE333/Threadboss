@@ -43,17 +43,41 @@ class Settings(BaseSettings):
 
     # Agent models. Defaults use free-tier-capable endpoints as of Sep 2026.
     knowledge_provider: str = 'gemini'
-    knowledge_model: str = 'gemini-2.5-flash-lite'
+    knowledge_model: str = 'gemini-3.1-flash-lite'
     planner_provider: str = 'gemini'
-    planner_model: str = 'gemini-2.5-flash-lite'
+    planner_model: str = 'gemini-3.1-flash-lite'
     followup_provider: str = 'cloudflare'
     followup_model: str = '@cf/zai-org/glm-4.7-flash'
     action_provider: str = 'gemini'
-    action_model: str = 'gemini-2.5-flash-lite'
+    action_model: str = 'gemini-3.1-flash-lite'
     router_provider: str = 'cloudflare'
     router_model: str = '@cf/zai-org/glm-4.7-flash'
     vision_provider: str = 'gemini'
-    vision_model: str = 'gemini-2.5-flash-lite'
+    vision_model: str = 'gemini-3.1-flash-lite'
+
+
+    # Gemini generation fallback. New AI Studio projects may not be provisioned
+    # for older Gemini 2.5 generation models even when the model can be listed.
+    gemini_fallback_model: str = 'gemini-3.1-flash-lite'
+
+    # Knowledge retrieval / temporal summaries.
+    default_timezone: str = 'Asia/Kolkata'
+    knowledge_summary_limit: int = 120
+
+    # Initial WAHA history backfill and manual /sync.
+    initial_backfill_hours: int = 24
+    initial_backfill_max_messages: int = 1500
+    history_sync_page_size: int = 100
+
+    # Media indexing for normal chats. Images/documents are local-first; audio is
+    # opt-in because Whisper can be CPU-heavy on small servers.
+    index_normal_chat_images: bool = True
+    index_normal_chat_documents: bool = True
+    index_normal_chat_audio: bool = False
+
+    # WAHA network resilience.
+    waha_request_retries: int = 4
+    waha_retry_base_seconds: float = 0.75
 
     # Embeddings. Gemini embedding has a free tier; 768 dims keeps pgvector compact.
     embedding_provider: str = 'gemini'

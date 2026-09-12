@@ -88,6 +88,16 @@ class EventBus:
         )
         return bool(result)
 
+    async def release_event_claim(self, event_id: str) -> None:
+        """Release a dedupe claim after processing failed so worker retries are real retries."""
+        await self.redis.delete(f'threadboss:dedupe:{event_id}')
+
+    async def is_initial_backfill_done(self, session: str) -> bool:
+        return bool(await self.redis.get(f'threadboss:backfill_done:{session}'))
+
+    async def mark_initial_backfill_done(self, session: str) -> None:
+        await self.redis.set(f'threadboss:backfill_done:{session}', '1')
+
     async def get_owner(self, session: str) -> str | None:
         return await self.redis.get(f'threadboss:owner:{session}')
 

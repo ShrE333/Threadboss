@@ -36,9 +36,14 @@ class EventProcessor:
             await self.router.handle(message)
             return
 
-        if self.settings.enrich_normal_chat_media and message.has_media and message.media:
+        if message.has_media and message.media:
             try:
-                context = await self.media.context_for_media(message.media, message.body)
+                # V1.5 passively indexes image/document text locally so event posters,
+                # screenshots and PDFs become searchable memory. Audio remains opt-in.
+                if self.settings.enrich_normal_chat_media:
+                    context = await self.media.context_for_media(message.media, message.body)
+                else:
+                    context = await self.media.context_for_memory(message.media)
                 if context:
                     message.body = (message.body + '\n\n--- Media context ---\n' + context).strip()
             except MediaProcessingError as exc:

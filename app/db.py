@@ -126,6 +126,33 @@ class Database:
             ''', tenant_id, limit)
         return [dict(r) for r in rows]
 
+    async def messages_in_range(
+        self,
+        tenant_id: str,
+        start: datetime,
+        end: datetime,
+        *,
+        received_only: bool = False,
+        limit: int = 120,
+    ) -> list[dict[str, Any]]:
+        await self.ensure()
+        assert self.pool
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                '''
+                SELECT channel, session_id, chat_id, sender_id, message_id, ts, text, from_me
+                FROM messages
+                WHERE tenant_id=$1
+                  AND ts >= $2 AND ts < $3
+                  AND text <> ''
+                  AND ($4::boolean = FALSE OR from_me = FALSE)
+                ORDER BY ts DESC
+                LIMIT $5
+                ''',
+                tenant_id, start, end, received_only, limit,
+            )
+        return [dict(r) for r in rows]
+
     async def create_task(self, *, tenant_id: str, channel: str, title: str, owner: str | None,
                           due_at: datetime | None, source_message_id: str | None, source_chat_id: str | None,
                           evidence: str | None, confidence: float = 0.5) -> int:
